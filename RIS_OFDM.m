@@ -12,12 +12,12 @@ N2 = N/N1;  % RIS y-axis
 U = 4;      % User
 RA = 1;     % RX ant.
 S = U*RA;   % Data stream
-L1 = 4;     % BS-RIS paths
-L2 = 4;     % RIS-UE paths
-L3 = 4;     % BS-UE paths
+L1 = 3;     % BS-RIS paths
+L2 = 3;     % RIS-UE paths
+L3 = 3;     % BS-UE paths
 scatter = 10;
-snr = 0:3:30;
-iter = 300;
+snr = -10:5:30;
+iter = 50;
 %% SCM parameters
 model_BR = SCM();
 model_BR.n_path = L1;
@@ -59,10 +59,11 @@ model_BU.fc = 28e9;
 model_BU.fs = 20e6;
 %% init.
 SR = zeros(1,length(snr));
-BER = zeros(1,length(snr));
+BER_ran = zeros(1,length(snr));
+BER_opt = zeros(1,length(snr));
 %% RIS sim.
+tic
 for i = 1:iter
-    tic
     %% channel gene. (BS-RIS)
     BR_temp = model_BR.FD_channel(fft_size + cp_size);
     h_BR(:,:,:) = BR_temp(:,1,:,:);
@@ -101,44 +102,74 @@ for i = 1:iter
         n = 1;
         gamma_ran = zeros(1,fft_size);
         gamma_opt = zeros(1,fft_size);
-        gamma_d = zeros(1,fft_size);
         
         for k = 1:fft_size
             H_BR_(:,:) = H_BR(k,:,:);
             H_RU_(:,:) = H_RU(k,:,:);
             H_BU_(:,:) = H_BU(k,:,:);
             %% eff. channel
-            He_ran = H_RU_ * ang_ran * H_BR_;
-            He_opt = H_RU_ * ang_opt * H_BR_;
+            He_ran(k,:,:) = H_BU_ + H_RU_ * ang_ran * H_BR_;
+            He_opt(k,:,:) = H_BU_ + H_RU_ * ang_opt * H_BR_;
+            He_ran_(:,:) = He_ran(k,:,:);
+            He_opt_(:,:) = He_opt(k,:,:);
             %% precoding (ZF)
-            G_ran = He_ran' * inv(He_ran * He_ran');
-            G_opt = He_opt' * inv(He_opt * He_opt');
-            G_d = H_BU_' * inv(H_BU_ * H_BU_');
+            G_ran = He_ran_' * inv(He_ran_ * He_ran_');
             gamma_ran(n) = trace(G_ran * G_ran');
-            gamma_opt(n) = trace(G_opt * G_opt');
-            gamma_d(n) = trace(G_d * G_d');
             pc_ran(:,k) = G_ran * (sym(:,k));
+            G_opt = He_opt_' * inv(He_opt_ * He_opt_');
+            gamma_opt(n) = trace(G_opt * G_opt');
             pc_opt(:,k) = G_opt * (sym(:,k));
-            pc_d(:,k) = G_d * (sym(:,k));
             n = n+1;
         end
         pc_ran = pc_ran./sqrt(gamma_ran);
-        pc_opt = pc_opt./sqrt(gamma_opt);
-        pc_d = pc_d./sqrt(gamma_d);
         ofdm_ran = ifft(pc_ran,fft_size,2)*sqrt(fft_size);
-        ofdm_opt = ifft(pc_opt,fft_size,2)*sqrt(fft_size);
-        ofdm_d = ifft(pc_d,fft_size,2)*sqrt(fft_size);
         cp_ran = [ofdm_ran(:,fft_size-cp_size+1:end) ofdm_ran];
+        pc_opt = pc_opt./sqrt(gamma_opt);
+        ofdm_opt = ifft(pc_opt,fft_size,2)*sqrt(fft_size);
         cp_opt = [ofdm_opt(:,fft_size-cp_size+1:end) ofdm_opt];
-        cp_d = [ofdm_d(:,fft_size-cp_size+1:end) ofdm_d];
         %% pass channel
+        he_ran = ifft(He_ran,fft_size,1);
+        he_ran_ = he_ran(1:L1+L2-1,:,:);
+        he_opt = ifft(He_opt,fft_size,1);
+        he_opt_ = he_opt(1:L1+L2-1,:,:);
         for r = 1 : U
             for t = 1 : M
-                receive_d(t,:) = conv(cp_d(t,:),h_BU(:,r,t).');
+                receive_ran(t,:) = conv(cp_ran(t,:),he_ran_(:,r,t).');
+                receive_opt(t,:) = conv(cp_opt(t,:),he_opt_(:,r,t).');
             end
-            hx_d(r,:) = sum(receive_d,1);
+            hx_ran(r,:) = sum(receive_ran,1);
+            hx_opt(r,:) = sum(receive_opt,1);
         end
+        %% Rx
+        [y_ran, No_ran] = awgn_noise( hx_ran, snr(snr_i) );
+        cp_remove_ran = y_ran(:,cp_size+1:fft_size+cp_size);
+        y_hat_ran = cp_remove_ran.* sqrt(gamma_ran);
+        ofdm_sym_rx_ran = fft(y_hat_ran,fft_size,2)/sqrt(fft_size);
+        rx_data_ran = base_demod(ofdm_sym_rx_ran, mod_type);
+        %BER_ran(snr_i) = BER_ran(snr_i) + sum( sum( data ~= rx_data_ran ) )/ (data_size * S);
+        num_error_ran(i,snr_i) = biterr(data,rx_data_ran);
         
+        [y_opt, No_opt] = awgn_noise( hx_opt, snr(snr_i) );
+        cp_remove_opt = y_opt(:,cp_size+1:fft_size+cp_size);
+        y_hat_opt = cp_remove_opt.* sqrt(gamma_opt);
+        ofdm_sym_rx_opt = fft(y_hat_opt,fft_size,2)/sqrt(fft_size);
+        rx_data_opt = base_demod(ofdm_sym_rx_opt, mod_type);
+        %BER_opt(snr_i) = BER_opt(snr_i) + sum( sum( data ~= rx_data_opt ) )/ (data_size * S);
+        num_error_opt(i,snr_i) = biterr(data,rx_data_opt);
     end
-    toc
+    
 end
+toc
+%BER_ran = BER_ran / iter;
+%BER_opt = BER_opt / iter;
+BER_ran = (sum(num_error_ran,1)/(data_size*S))/iter;
+BER_opt = (sum(num_error_opt,1)/(data_size*S))/iter;
+%% figure
+semilogy(snr, BER_ran, '-d');
+hold on
+semilogy(snr, BER_opt, '-d');
+title('BER Performance')
+legend('Ran','Opt')
+ylabel('BER')
+xlabel('SNR (dB)')
+grid on
